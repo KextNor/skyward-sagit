@@ -1,0 +1,120 @@
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  DEVICE: sagit
+  DEVICE_NAME: Xiaomi Mi 6
+  STOCK_URL: https://cdnorg.d.miui.com/V11.0.5.0.PCACNXM/sagit_images_V11.0.5.0.PCACNXM_20200305.0000.00_9.0_cn_f1f49274f9.tgz
+  SKYWARD_REPO: KextNor/skyward
+  SKYWARD_REF: aonly
+
+jobs:
+  build:
+    name: Build the recovery
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get Skyward
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SKYWARD_REPO }}
+          ref: ${{ env.SKYWARD_REF }}
+          path: skyward
+
+      - name: Install the toolchain Skyward names
+        working-directory: skyward
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: skyward -> target
+
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r29
+          add-to-path: false
+
+      - name: Point cargo-ndk at the NDK
+        run: echo "ANDROID_NDK_HOME=${{ steps.ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+
+      - name: Build cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+
+      - name: Free disk before the stock package
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Build the recovery service
+        working-directory: skyward
+        run: cargo ndk -t arm64-v8a --platform 30 build --locked --release -p skyward
+
+      - name: Build the second system's first program
+        working-directory: skyward
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo ndk -t arm64-v8a --platform 30 build --locked --release -p skyward-system-init --target-dir target/system-init
+
+      - name: Build the packer
+        working-directory: skyward
+        run: cargo build --locked --release -p skyward-pack
+
+      - name: Take the stock recovery out of the stock build
+        run: |
+          curl -fL -A "Mozilla/5.0" --retry 3 --retry-delay 5 -o stock.tgz "$STOCK_URL"
+          mkdir -p stock
+          tar -xzf stock.tgz --wildcards '*/images/recovery.img' -O > stock/recovery.img
+          rm -f stock.tgz
+          ls -l stock/recovery.img
+          tail -c 64 stock/recovery.img | grep -a AVBf
+
+      - name: Pack the recovery
+        id: pack
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version="$GITHUB_REF_NAME"
+          else
+            version="0.3.1-${GITHUB_SHA::7}"
+          fi
+          name="skyward-$version-$DEVICE"
+          mkdir -p out
+          skyward/target/release/skyward-pack recovery \
+            --stock stock/recovery.img \
+            --binary skyward/target/aarch64-linux-android/release/skyward \
+            --system-init skyward/target/system-init/aarch64-linux-android/release/system-init \
+            --config "devices/$DEVICE.toml" \
+            --font skyward/resources/fonts/MiSansVF.ttf \
+            --mono skyward/resources/fonts/KirkMono-Regular.ttf \
+            --mono-license skyward/resources/fonts/KirkMono-OFL.txt \
+            --out "out/$name.img"
+          (cd out && zip -9 "$name.zip" "$name.img")
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack.outputs.name }}
+          path: out/${{ steps.pack.outputs.name }}.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAME: ${{ steps.pack.outputs.name }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$DEVICE_NAME ($DEVICE) $GITHUB_REF_NAME" \
+            --generate-notes \
+            "out/$NAME.zip#${DEVICE_NAME} (${DEVICE})"
