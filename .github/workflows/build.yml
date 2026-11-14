@@ -69,9 +69,18 @@ jobs:
         working-directory: skyward
         run: cargo build --release -p skyward-pack
 
+      - name: Keep the stock build between runs
+        uses: actions/cache@v4
+        with:
+          path: stock.tgz
+          key: stock-${{ env.DEVICE }}-v1
+
       - name: Take the stock recovery out of the stock build
         run: |
-          curl -fL -A "Mozilla/5.0" --retry 3 --retry-delay 5 -o stock.tgz "$STOCK_URL"
+          if [ ! -f stock.tgz ]; then
+            sudo apt-get install -y aria2 > /dev/null
+            aria2c -x8 -s8 -k1M --file-allocation=none -A "Mozilla/5.0" -o stock.tgz "$STOCK_URL"
+          fi
           mkdir -p stock
           tar -xzf stock.tgz --wildcards '*/images/recovery.img' -O > stock/recovery.img
           rm -f stock.tgz
