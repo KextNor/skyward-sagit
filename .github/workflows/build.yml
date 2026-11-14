@@ -76,7 +76,6 @@ jobs:
           tar -xzf stock.tgz --wildcards '*/images/recovery.img' -O > stock/recovery.img
           rm -f stock.tgz
           ls -l stock/recovery.img
-          tail -c 64 stock/recovery.img | grep -a AVBf
 
       - name: Pack the recovery
         id: pack
